@@ -10,3 +10,4 @@ Module.symvers
 modules.order
 modules.builtin
 .cache.mk
+*.mod

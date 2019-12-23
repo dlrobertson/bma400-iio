@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 
 #include "bma400.h"
 
@@ -52,9 +53,10 @@ struct bma400_sample_freq {
 
 struct bma400_data {
 	struct device *dev;
+	struct regmap *regmap;
+	struct regulator_bulk_data regulators[BMA400_NUM_REGULATORS];
 	struct mutex mutex; /* data register lock */
 	struct iio_mount_matrix orientation;
-	struct regmap *regmap;
 	enum bma400_power_mode power_mode;
 	struct bma400_sample_freq sample_freq;
 	int oversampling_ratio;
@@ -185,7 +187,7 @@ static int bma400_get_temp_reg(struct bma400_data *data, int *val, int *val2)
 		return -EBUSY;
 
 	ret = regmap_read(data->regmap, BMA400_TEMP_DATA_REG, &raw_temp);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	host_temp = sign_extend32(raw_temp, 7);
@@ -227,7 +229,7 @@ static int bma400_get_accel_reg(struct bma400_data *data,
 	/* bulk read two registers, with the base being the LSB register */
 	ret = regmap_bulk_read(data->regmap, lsb_reg, &raw_accel,
 			       sizeof(raw_accel));
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	*val = sign_extend32(le16_to_cpu(raw_accel), 11);
@@ -266,7 +268,7 @@ static int bma400_get_accel_output_data_rate(struct bma400_data *data)
 		 * register.
 		 */
 		ret = regmap_read(data->regmap, BMA400_ACC_CONFIG1_REG, &val);
-		if (ret < 0)
+		if (ret)
 			goto error;
 
 		odr = val & BMA400_ACC_ODR_MASK;
@@ -302,13 +304,12 @@ static int bma400_set_accel_output_data_rate(struct bma400_data *data,
 	int ret;
 
 	if (hz >= BMA400_ACC_ODR_MIN_WHOLE_HZ) {
-		if (uhz || hz % BMA400_ACC_ODR_MIN_WHOLE_HZ)
+		if (uhz || hz > BMA400_ACC_ODR_MAX_HZ)
 			return -EINVAL;
 
-		val = hz / BMA400_ACC_ODR_MIN_WHOLE_HZ;
-		idx = __ffs(val);
+		idx = __ffs(hz);
 
-		if (val ^ BIT(idx))
+		if (hz >> idx != BMA400_ACC_ODR_MIN_WHOLE_HZ)
 			return -EINVAL;
 
 		idx += BMA400_ACC_ODR_MIN_RAW + 1;
@@ -319,14 +320,14 @@ static int bma400_set_accel_output_data_rate(struct bma400_data *data,
 	}
 
 	ret = regmap_read(data->regmap, BMA400_ACC_CONFIG1_REG, &val);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	/* preserve the range and normal mode osr */
 	odr = (~BMA400_ACC_ODR_MASK & val) | idx;
 
 	ret = regmap_write(data->regmap, BMA400_ACC_CONFIG1_REG, odr);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	bma400_output_data_rate_from_raw(idx, &data->sample_freq.hz,
@@ -349,7 +350,7 @@ static int bma400_get_accel_oversampling_ratio(struct bma400_data *data)
 	switch (data->power_mode) {
 	case POWER_MODE_LOW:
 		ret = regmap_read(data->regmap, BMA400_ACC_CONFIG0_REG, &val);
-		if (ret < 0) {
+		if (ret) {
 			data->oversampling_ratio = -1;
 			return ret;
 		}
@@ -360,7 +361,7 @@ static int bma400_get_accel_oversampling_ratio(struct bma400_data *data)
 		return 0;
 	case POWER_MODE_NORMAL:
 		ret = regmap_read(data->regmap, BMA400_ACC_CONFIG1_REG, &val);
-		if (ret < 0) {
+		if (ret) {
 			data->oversampling_ratio = -1;
 			return ret;
 		}
@@ -374,7 +375,7 @@ static int bma400_get_accel_oversampling_ratio(struct bma400_data *data)
 		return 0;
 	default:
 		data->oversampling_ratio = -1;
-		return 0;
+		return -EINVAL;
 	}
 }
 
@@ -395,13 +396,13 @@ static int bma400_set_accel_oversampling_ratio(struct bma400_data *data,
 	case POWER_MODE_LOW:
 		ret = regmap_read(data->regmap, BMA400_ACC_CONFIG0_REG,
 				  &acc_config);
-		if (ret < 0)
+		if (ret)
 			return ret;
 
 		ret = regmap_write(data->regmap, BMA400_ACC_CONFIG0_REG,
 				   (acc_config & ~BMA400_LP_OSR_MASK) |
 				   (val << BMA400_LP_OSR_SHIFT));
-		if (ret < 0) {
+		if (ret) {
 			dev_err(data->dev, "Failed to write out OSR\n");
 			return ret;
 		}
@@ -411,13 +412,13 @@ static int bma400_set_accel_oversampling_ratio(struct bma400_data *data,
 	case POWER_MODE_NORMAL:
 		ret = regmap_read(data->regmap, BMA400_ACC_CONFIG1_REG,
 				  &acc_config);
-		if (ret < 0)
+		if (ret)
 			return ret;
 
 		ret = regmap_write(data->regmap, BMA400_ACC_CONFIG1_REG,
 				   (acc_config & ~BMA400_NP_OSR_MASK) |
 				   (val << BMA400_NP_OSR_SHIFT));
-		if (ret < 0) {
+		if (ret) {
 			dev_err(data->dev, "Failed to write out OSR\n");
 			return ret;
 		}
@@ -430,22 +431,16 @@ static int bma400_set_accel_oversampling_ratio(struct bma400_data *data,
 	return ret;
 }
 
-static void bma400_accel_scale_from_raw(int raw, unsigned int *val)
-{
-	*val = BMA400_SCALE_MIN * (1 << raw);
-}
-
 int bma400_accel_scale_to_raw(struct bma400_data *data, unsigned int val)
 {
-	int scale = val / BMA400_SCALE_MIN;
 	int raw;
 
-	if (scale == 0)
+	if (val == 0)
 		return -EINVAL;
 
-	raw = __ffs(scale);
+	raw = __ffs(val);
 
-	if (val % BMA400_SCALE_MIN || scale ^ BIT(raw))
+	if (val >> raw != BMA400_SCALE_MIN)
 		return -EINVAL;
 
 	return raw;
@@ -458,14 +453,14 @@ static int bma400_get_accel_scale(struct bma400_data *data)
 	int ret;
 
 	ret = regmap_read(data->regmap, BMA400_ACC_CONFIG1_REG, &val);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	raw_scale = (val & BMA400_ACC_SCALE_MASK) >> BMA400_SCALE_SHIFT;
 	if (raw_scale > BMA400_TWO_BITS_MASK)
 		return -EINVAL;
 
-	bma400_accel_scale_from_raw(raw_scale, &data->scale);
+	data->scale = BMA400_SCALE_MIN << raw_scale;
 
 	return 0;
 }
@@ -477,7 +472,7 @@ static int bma400_set_accel_scale(struct bma400_data *data, unsigned int val)
 	int ret;
 
 	ret = regmap_read(data->regmap, BMA400_ACC_CONFIG1_REG, &acc_config);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	raw = bma400_accel_scale_to_raw(data, val);
@@ -487,7 +482,7 @@ static int bma400_set_accel_scale(struct bma400_data *data, unsigned int val)
 	ret = regmap_write(data->regmap, BMA400_ACC_CONFIG1_REG,
 			   (acc_config & ~BMA400_ACC_SCALE_MASK) |
 			   (raw << BMA400_SCALE_SHIFT));
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	data->scale = val;
@@ -500,7 +495,7 @@ static int bma400_get_power_mode(struct bma400_data *data)
 	int ret;
 
 	ret = regmap_read(data->regmap, BMA400_STATUS_REG, &val);
-	if (ret < 0) {
+	if (ret) {
 		dev_err(data->dev, "Failed to read status register\n");
 		return ret;
 	}
@@ -516,7 +511,7 @@ static int bma400_set_power_mode(struct bma400_data *data,
 	int ret;
 
 	ret = regmap_read(data->regmap, BMA400_ACC_CONFIG0_REG, &val);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	if (data->power_mode == mode)
@@ -528,7 +523,7 @@ static int bma400_set_power_mode(struct bma400_data *data,
 	/* Preserve the low-power oversample ratio etc */
 	ret = regmap_write(data->regmap, BMA400_ACC_CONFIG0_REG,
 			   mode | (val & ~BMA400_TWO_BITS_MASK));
-	if (ret < 0) {
+	if (ret) {
 		dev_err(data->dev, "Failed to write to power-mode\n");
 		return ret;
 	}
@@ -558,7 +553,7 @@ static void bma400_init_tables(void)
 	for (i = 0; i + 1 < ARRAY_SIZE(bma400_scales); i += 2) {
 		raw = i / 2;
 		bma400_scales[i] = 0;
-		bma400_accel_scale_from_raw(raw, &bma400_scales[i + 1]);
+		bma400_scales[i + 1] = BMA400_SCALE_MIN << raw;
 	}
 }
 
@@ -569,27 +564,49 @@ static int bma400_init(struct bma400_data *data)
 
 	/* Try to read chip_id register. It must return 0x90. */
 	ret = regmap_read(data->regmap, BMA400_CHIP_ID_REG, &val);
-	if (ret < 0) {
+	if (ret) {
 		dev_err(data->dev, "Failed to read chip id register\n");
-		return ret;
+		goto out;
 	}
 
 	if (val != BMA400_ID_REG_VAL) {
 		dev_err(data->dev, "Chip ID mismatch\n");
-		return -ENODEV;
+		ret = -ENODEV;
+		goto out;
+	}
+
+	data->regulators[BMA400_VDD_REGULATOR].supply = "vdd";
+	data->regulators[BMA400_VDDIO_REGULATOR].supply = "vddio";
+	ret = devm_regulator_bulk_get(data->dev,
+				      ARRAY_SIZE(data->regulators),
+				      data->regulators);
+	if (ret) {
+		if (ret != -EPROBE_DEFER)
+			dev_err(data->dev,
+				"Failed to get regulators: %d\n",
+				ret);
+
+		goto out;
+	}
+	ret = regulator_bulk_enable(ARRAY_SIZE(data->regulators),
+				    data->regulators);
+	if (ret) {
+		dev_err(data->dev, "Failed to enable regulators: %d\n",
+			ret);
+		goto out;
 	}
 
 	ret = bma400_get_power_mode(data);
-	if (ret < 0) {
+	if (ret) {
 		dev_err(data->dev, "Failed to get the initial power-mode\n");
-		return ret;
+		goto err_reg_disable;
 	}
 
 	if (data->power_mode != POWER_MODE_NORMAL) {
 		ret = bma400_set_power_mode(data, POWER_MODE_NORMAL);
-		if (ret < 0) {
+		if (ret) {
 			dev_err(data->dev, "Failed to wake up the device\n");
-			return ret;
+			goto err_reg_disable;
 		}
 		/*
 		 * TODO: The datasheet waits 1500us here in the example, but
@@ -601,16 +618,16 @@ static int bma400_init(struct bma400_data *data)
 	bma400_init_tables();
 
 	ret = bma400_get_accel_output_data_rate(data);
-	if (ret < 0)
-		return ret;
+	if (ret)
+		goto err_reg_disable;
 
 	ret = bma400_get_accel_oversampling_ratio(data);
-	if (ret < 0)
-		return ret;
+	if (ret)
+		goto err_reg_disable;
 
 	ret = bma400_get_accel_scale(data);
-	if (ret < 0)
-		return ret;
+	if (ret)
+		goto err_reg_disable;
 
 	/*
 	 * Once the interrupt engine is supported we might use the
@@ -619,6 +636,12 @@ static int bma400_init(struct bma400_data *data)
 	 * channel.
 	 */
 	return regmap_write(data->regmap, BMA400_ACC_CONFIG2_REG, 0x00);
+
+err_reg_disable:
+	regulator_bulk_disable(ARRAY_SIZE(data->regulators),
+			       data->regulators);
+out:
+	return ret;
 }
 
 static int bma400_read_raw(struct iio_dev *indio_dev,
@@ -718,7 +741,7 @@ static int bma400_write_raw(struct iio_dev *indio_dev,
 		 * The sample frequency is readonly for the temperature
 		 * register and a fixed value in low-power mode.
 		 */
-		if (chan->type != IIO_ACCEL || val > BMA400_ACC_ODR_MAX_HZ)
+		if (chan->type != IIO_ACCEL)
 			return -EINVAL;
 
 		mutex_lock(&data->mutex);
@@ -781,7 +804,7 @@ int bma400_probe(struct device *dev, struct regmap *regmap, const char *name)
 	data->dev = dev;
 
 	ret = bma400_init(data);
-	if (ret < 0)
+	if (ret)
 		return ret;
 
 	ret = iio_read_mount_matrix(dev, "mount-matrix", &data->orientation);
@@ -811,6 +834,9 @@ int bma400_remove(struct device *dev)
 	mutex_lock(&data->mutex);
 	ret = bma400_set_power_mode(data, POWER_MODE_SLEEP);
 	mutex_unlock(&data->mutex);
+
+	regulator_bulk_disable(ARRAY_SIZE(data->regulators),
+			       data->regulators);
 
 	iio_device_unregister(indio_dev);
 

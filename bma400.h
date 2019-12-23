@@ -65,15 +65,15 @@
 /* Chip ID of BMA 400 devices found in the chip ID register. */
 #define BMA400_ID_REG_VAL           0x90
 
-#define BMA400_LP_OSR_SHIFT         0x05
-#define BMA400_NP_OSR_SHIFT         0x04
-#define BMA400_SCALE_SHIFT          0x06
+#define BMA400_LP_OSR_SHIFT         5
+#define BMA400_NP_OSR_SHIFT         4
+#define BMA400_SCALE_SHIFT          6
 
 #define BMA400_TWO_BITS_MASK        GENMASK(1, 0)
-#define BMA400_LP_OSR_MASK          GENMASK(6, BMA400_LP_OSR_SHIFT)
-#define BMA400_NP_OSR_MASK          GENMASK(5, BMA400_NP_OSR_SHIFT)
+#define BMA400_LP_OSR_MASK          GENMASK(6, 5)
+#define BMA400_NP_OSR_MASK          GENMASK(5, 4)
 #define BMA400_ACC_ODR_MASK         GENMASK(3, 0)
-#define BMA400_ACC_SCALE_MASK       GENMASK(7, BMA400_SCALE_SHIFT)
+#define BMA400_ACC_SCALE_MASK       GENMASK(7, 6)
 
 #define BMA400_ACC_ODR_MIN_RAW      0x05
 #define BMA400_ACC_ODR_LP_RAW       0x06
@@ -84,7 +84,11 @@
 #define BMA400_ACC_ODR_MIN_HZ       12
 
 #define BMA400_SCALE_MIN            38357
-#define BMA400_SCALE_MAX            306862
+#define BMA400_SCALE_MAX            306864
+
+#define BMA400_NUM_REGULATORS       2
+#define BMA400_VDD_REGULATOR        0
+#define BMA400_VDDIO_REGULATOR      1
 
 extern const struct regmap_config bma400_regmap_config;
 

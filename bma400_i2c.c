@@ -19,7 +19,6 @@ static int bma400_i2c_probe(struct i2c_client *client,
 	struct regmap *regmap;
 
 	regmap = devm_regmap_init_i2c(client, &bma400_regmap_config);
-
 	if (IS_ERR(regmap)) {
 		dev_err(&client->dev, "failed to create regmap\n");
 		return PTR_ERR(regmap);

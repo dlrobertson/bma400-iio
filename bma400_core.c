@@ -307,6 +307,7 @@ static int bma400_set_accel_output_data_rate(struct bma400_data *data,
 		if (uhz || hz > BMA400_ACC_ODR_MAX_HZ)
 			return -EINVAL;
 
+		/* Note this works because MIN_WHOLE_HZ is odd */
 		idx = __ffs(hz);
 
 		if (hz >> idx != BMA400_ACC_ODR_MIN_WHOLE_HZ)
@@ -431,13 +432,15 @@ static int bma400_set_accel_oversampling_ratio(struct bma400_data *data,
 	return ret;
 }
 
-int bma400_accel_scale_to_raw(struct bma400_data *data, unsigned int val)
+static int bma400_accel_scale_to_raw(struct bma400_data *data,
+				     unsigned int val)
 {
 	int raw;
 
 	if (val == 0)
 		return -EINVAL;
 
+	/* Note this works because BMA400_SCALE_MIN is odd */
 	raw = __ffs(val);
 
 	if (val >> raw != BMA400_SCALE_MIN)
@@ -749,7 +752,8 @@ static int bma400_write_raw(struct iio_dev *indio_dev,
 		mutex_unlock(&data->mutex);
 		return ret;
 	case IIO_CHAN_INFO_SCALE:
-		if (val != 0 || val2 > BMA400_SCALE_MAX)
+		if (val != 0 ||
+		    val2 < BMA400_SCALE_MIN || val2 > BMA400_SCALE_MAX)
 			return -EINVAL;
 
 		mutex_lock(&data->mutex);
